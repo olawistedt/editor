@@ -681,8 +681,10 @@ void checkExternalChanges() {
         if (CompareFileTime(&ft, &d->mtime) == 0) continue;
         CHARRANGE sel{};
         SendMessageW(d->edit, EM_EXGETSEL, 0, (LPARAM)&sel);
+        int topLine = (int)SendMessageW(d->edit, EM_GETFIRSTVISIBLELINE, 0, 0);
         if (loadFileInto(d, d->path)) {
             SendMessageW(d->edit, EM_EXSETSEL, 0, (LPARAM)&sel);
+            SendMessageW(d->edit, EM_LINESCROLL, 0, topLine - (int)SendMessageW(d->edit, EM_GETFIRSTVISIBLELINE, 0, 0));
             if (d == curDoc()) toast(L"Reloaded - file changed on disk");
         }
     }
@@ -1056,6 +1058,8 @@ void onTick() {
     DWORD now = GetTickCount();
     for (auto& d : g_docs)
         if (d->pending && (now - d->lastChange >= 700 || now - d->firstPending >= 3000)) saveDoc(d.get());
+    static DWORD lastExtCheck = 0;
+    if (now - lastExtCheck >= 500) { lastExtCheck = now; checkExternalChanges(); }
     if (g_msgUntil && (int)(now - g_msgUntil) >= 0) { g_msgUntil = 0; g_msg.clear(); g_statusDirty = true; }
     if (g_statusDirty) updateStatus();
 }
