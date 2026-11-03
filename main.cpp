@@ -314,6 +314,46 @@ void applyZoom(Doc* d) {
     else SendMessageW(d->edit, EM_SETZOOM, g_zoom, 100);
 }
 
+// ---------------------------------------------------------------- silence
+
+BOOL WINAPI NoMessageBeep(UINT) { return TRUE; }
+BOOL WINAPI NoBeep(DWORD, DWORD) { return TRUE; }
+
+// RichEdit plays a sound through MessageBeep/Beep whenever a key cannot do anything (End at end of line,
+// Backspace at start, ...). Redirect those imports in the loaded Msftedit.dll to no-ops.
+void silenceThunks(BYTE* base, DWORD namesRva, DWORD iatRva) {
+    auto names = (IMAGE_THUNK_DATA*)(base + (namesRva ? namesRva : iatRva));
+    auto iat = (IMAGE_THUNK_DATA*)(base + iatRva);
+    for (; names->u1.AddressOfData; names++, iat++) {
+        if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
+        auto ibn = (IMAGE_IMPORT_BY_NAME*)(base + names->u1.AddressOfData);
+        void* repl = nullptr;
+        if (strcmp(ibn->Name, "MessageBeep") == 0) repl = (void*)&NoMessageBeep;
+        else if (strcmp(ibn->Name, "Beep") == 0) repl = (void*)&NoBeep;
+        if (!repl) continue;
+        DWORD old;
+        if (VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) {
+            iat->u1.Function = (ULONG_PTR)repl;
+            VirtualProtect(&iat->u1.Function, sizeof(void*), old, &old);
+        }
+    }
+}
+
+void silenceModule(HMODULE mod) {
+    auto base = (BYTE*)mod;
+    auto dos = (IMAGE_DOS_HEADER*)base;
+    auto nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    auto& imports = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (imports.VirtualAddress)
+        for (auto imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + imports.VirtualAddress); imp->Name; imp++)
+            silenceThunks(base, imp->OriginalFirstThunk, imp->FirstThunk);
+    // MessageBeep is a delay-loaded import in Msftedit.dll; the thunk jumps through the delay IAT.
+    auto& delayed = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
+    if (delayed.VirtualAddress)
+        for (auto d = (IMAGE_DELAYLOAD_DESCRIPTOR*)(base + delayed.VirtualAddress); d->DllNameRVA; d++)
+            silenceThunks(base, d->ImportNameTableRVA, d->ImportAddressTableRVA);
+}
+
 // ---------------------------------------------------------------- subclasses
 
 LRESULT CALLBACK EditSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) {
@@ -561,7 +601,7 @@ void openFile(const std::wstring& raw) {
         }
     std::string probe;
     if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        MessageBoxW(g_hwnd, (L"Cannot find the file:\n" + path).c_str(), kAppName, MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hwnd, (L"Cannot find the file:\n" + path).c_str(), kAppName, MB_OK);
         return;
     }
     Doc* reuse = nullptr;
@@ -571,7 +611,7 @@ void openFile(const std::wstring& raw) {
     }
     Doc* d = reuse ? reuse : createDoc();
     if (!loadFileInto(d, path)) {
-        MessageBoxW(g_hwnd, (L"Could not open the file:\n" + path).c_str(), kAppName, MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hwnd, (L"Could not open the file:\n" + path).c_str(), kAppName, MB_OK);
         if (!reuse) { DestroyWindow(d->edit); g_docs.pop_back(); }
         return;
     }
@@ -1561,7 +1601,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int nShow) {
     OleInitialize(nullptr);
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
-    LoadLibraryW(L"Msftedit.dll");
+    if (HMODULE re = LoadLibraryW(L"Msftedit.dll")) silenceModule(re);
     enableDarkMenus();
 
     GdiplusStartupInput gsi;
